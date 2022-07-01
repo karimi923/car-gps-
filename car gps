@@ -1,0 +1,455 @@
+//mohammadkarimi 1400-1401 gps Security car - esp32
+#include <TinyGPS++.h>
+//sender phone number with country code.
+const String PHONE = "+989194619298";
+#define RELAY_1 22
+#define RELAY_2 23
+#define sdoor  21                  // sensor door car
+#define sbat   19                 // sensor batrey car
+#define szzz   18 
+
+                                   // sensor dozd car 
+//GSM Module RX pin to ESP32 2
+//GSM Module TX pin to ESP32 4
+#define rxPin 4
+#define txPin 2
+HardwareSerial sim800(1);
+
+#define RXD2 16
+#define TXD2 17
+HardwareSerial neogps(2);
+
+TinyGPSPlus gps;
+int sensordoor ;
+int sensorbat ;
+int sensorzzz ;
+
+int oksmscar = false;
+int okcallcar = false;
+String smsStatus,senderNumber,receivedDate,msg;
+boolean isReply = false;
+boolean ussdCmd = false;
+unsigned long timer;
+
+void setup() {
+  //delay(7000);
+  
+  Serial.begin(115200);
+  Serial.println("esp32 serial initialize");
+  
+  sim800.begin(9600, SERIAL_8N1, rxPin, txPin);
+  Serial.println("SIM800L serial initialize");
+
+  neogps.begin(9600, SERIAL_8N1, RXD2, TXD2);
+  Serial.println("neogps serial initialize");
+  
+  smsStatus = "";
+  senderNumber="";
+  receivedDate="";
+  msg=""; 
+  pinMode(RELAY_1, OUTPUT); //Relay 1
+  pinMode(RELAY_2, OUTPUT); //Relay 2
+  pinMode(sdoor, INPUT_PULLDOWN); 
+  pinMode(sbat, INPUT_PULLDOWN); 
+  pinMode(szzz, INPUT_PULLUP);
+ 
+  digitalWrite(RELAY_1, LOW);
+  digitalWrite(RELAY_2, LOW);
+  digitalWrite(sbat, LOW );
+  digitalWrite(sdoor, LOW);
+  digitalWrite(szzz, HIGH);
+  sim800.println("AT+CMGF=1"); //SMS text mode  
+  delay(7000);
+  
+  sim800.println("AT+CMGD=1,4"); //delete all saved SMS
+  delay(1000);
+ 
+} //setup function ends
+
+void loop() { 
+  while(sim800.available()){
+    parseData(sim800.readString());
+  }
+  while(Serial.available())  {
+    sim800.println(Serial.readString());
+  }
+     
+  sensorSMSBAT();
+  sensorSMSZZZ();
+  sensorSMSDOOR();
+  sensorCALLBAT();
+  sensorCALLZZZ();
+  sensorCALLDOOR(); 
+                                                                                                                                                                                   
+} 
+void sendRseponseATcommand(String ATcommand, boolean deleted){
+
+    if (ATcommand.equals("")){
+      return;
+    }
+    
+    uint8_t answer=0;
+    unsigned int timeout = 1000;
+    String response;
+    unsigned long previous;
+
+    delay(100);
+    
+    //Clean the input buffer
+    while(sim800.available() > 0) sim800.read();
+
+    //Send the AT command 
+    sim800.println(ATcommand);
+    
+    previous = millis();
+
+    //this loop waits for the answer with time out
+    do{
+        //if there are data in the UART input buffer, reads it.
+        if(sim800.available() != 0){
+          response = sim800.readString();
+          
+          if(response != "")
+            answer == 1;
+        }
+    }while((answer == 0) && ((millis() - previous) < timeout));
+
+  //Remove sent "AT Command" from the response string.
+  int index = response.indexOf("\r");
+  response.remove(0, index+2);
+  response.trim();
+  //Remove OK from the response string.
+  index =response.indexOf("\n\r");
+  response = response.substring(0, index);
+  response.trim();
+  Serial.println("---------------------");
+  Serial.println(response);
+  Serial.println("---------------------");
+  
+  if(deleted == true)
+    {Reply("Delete: "+response);}
+  //if received sms have delete command 
+  else
+    {Reply(response);}
+
+}     
+void parseData(String buff){
+  Serial.println(buff);
+
+  unsigned int len, index;
+  //////////////////////////////////////////////////
+  //Remove sent "AT Command" from the response string.
+  index = buff.indexOf("\r");
+  buff.remove(0, index+2);
+  buff.trim();
+    if(buff.indexOf("RING")>-1){
+  
+      sim800.println("ATA");
+      delay(1000);
+      sim800.println("AT+CMIC=0,14");
+   }
+  if(buff != "OK"){
+    index = buff.indexOf(":");
+    String cmd = buff.substring(0, index);
+    cmd.trim();
+    
+    buff.remove(0, index+2);
+    //Serial.println(buff);
+    
+    if(cmd == "+CMTI"){
+      //get newly arrived memory location and store it in temp
+      //temp = 4
+      index = buff.indexOf(",");
+      String temp = buff.substring(index+1, buff.length()); 
+      temp = "AT+CMGR=" + temp + "\r"; 
+      //AT+CMGR=4 i.e. get message stored at memory location 4
+      sim800.println(temp); 
+    }
+    else if(cmd == "+CMGR"){
+      extractSms(buff);
+      //Serial.println("extractSms Success.");
+       if(msg.startsWith("at+") && senderNumber == PHONE){
+        //if received sms have ussd code
+        if(msg.startsWith("at+cusd=1"))
+          {ussdCmd = true;Serial.println("startsWith");sim800.println(msg);}
+        //if received sms have delete command 
+        else if(msg.startsWith("at+cmgd"))
+          {sendRseponseATcommand(msg, true);}
+        else 
+          {sendRseponseATcommand(msg, false);}
+      }
+     
+      else if(ussdCmd == true){
+        ussdCmd = false;
+        Serial.println("startsWith1");
+        Reply(msg);
+      }
+
+      if(senderNumber == PHONE){
+        if(msg == "g"){                //send gps location
+          sendLocation();
+          sendSpeed();          
+        }
+        else if(msg == "son"){         //on security car
+          oksmscar=true ;
+          okcallcar=false ;
+          Reply("ON GPS SMS Security CAR"); 
+        }
+        else if(msg == "soff"){        //off security car
+          oksmscar=false ;
+          Reply("OFF GPS SMS Security CAR");
+          digitalWrite(RELAY_1, LOW);
+          delay(1000);
+          digitalWrite(RELAY_2, LOW);
+          delay(1000);
+        }                                           
+        else if(msg == "con"){         //on security car
+          okcallcar=true ;
+          oksmscar=false ;
+          Reply("ON GPS CALL Security CAR"); 
+        }
+        else if(msg == "coff"){        //off security car
+          okcallcar=false ;
+          Reply("OFF GPS CALL Security CAR");
+          digitalWrite(RELAY_1, LOW);
+          delay(1000);
+          digitalWrite(RELAY_2, LOW);
+          delay(1000);                   
+        }   
+        else if(msg == "mkon"){         //on security car
+          okcallcar=true ;
+          oksmscar=true ;
+          Reply("ON GPS CALL & SMS Security CAR"); 
+        }
+        else if(msg == "mkoff"){        //off security car
+          okcallcar=false ;
+          oksmscar=false ;
+          Reply("OFF GPS CALL & SMS Security CAR");
+          digitalWrite(RELAY_1, LOW);
+          delay(1000);
+          digitalWrite(RELAY_2, LOW);
+          delay(1000);                   
+        }                                                       
+        else if(msg == "1off"){  
+          digitalWrite(RELAY_1, LOW);
+          Reply("Relay POMP 1 OFF");
+        }
+        else if(msg == "1on"){
+          digitalWrite(RELAY_1, HIGH);
+          Reply("Relay POMP 1 ON");
+        }
+        else if(msg == "2off"){
+          digitalWrite(RELAY_2, LOW);
+          Reply("Relay HI 2 OFF");
+        }
+        else if(msg == "2on"){
+          digitalWrite(RELAY_2, HIGH);
+          Reply("Relay HI 2 ON");
+        }
+        else if(msg == "del"){
+          sim800.println("AT+CMGDA=\"DEL ALL\"\r\n");
+          Reply("delet all sms");
+        }
+        
+      }
+       sim800.println("AT+CMGD=1,4"); //delete all saved SMS
+       delay(1000);      
+       smsStatus = "";
+       senderNumber="";
+       receivedDate="";
+       msg="";
+    }
+  //////////////////////////////////////////////////
+  }
+  else{
+  //The result of AT Command is "OK"
+  }
+}
+void extractSms(String buff){
+   unsigned int index;
+   Serial.println(buff);
+
+    index =buff.indexOf(",");
+    smsStatus = buff.substring(1, index-1); 
+    buff.remove(0, index+2);
+    
+    senderNumber = buff.substring(0, 13);
+    buff.remove(0,19);
+   
+    receivedDate = buff.substring(0, 20);
+    buff.remove(0,buff.indexOf("\r"));
+    buff.trim();
+    
+    index =buff.indexOf("\n\r");
+    buff = buff.substring(0, index);
+    buff.trim();
+    msg = buff;
+    buff = "";
+    msg.toLowerCase(); 
+}  
+void sendLocation()
+{
+  // Can take up to 60 seconds
+  boolean newData = false;
+  for (unsigned long start = millis(); millis() - start < 2000;)
+  {
+    while (neogps.available())
+    {
+      if (gps.encode(neogps.read()))
+      {
+        newData = true;
+      }
+    }
+  }
+  if (newData)      //If newData is true
+  {
+    Serial.print("Latitude= "); 
+    Serial.print(gps.location.lat(), 6);
+    Serial.print(" Longitude= "); 
+    Serial.println(gps.location.lng(), 6);
+    newData = false;
+    delay(300);
+    sim800.print("AT+CMGF=1\r");
+    delay(1000);
+    sim800.print("AT+CMGS=\""+PHONE+"\"\r");
+    delay(1000);
+    sim800.print("http://maps.google.com/maps?q=loc:");
+    sim800.print(gps.location.lat(), 6);
+    sim800.print(",");
+    sim800.print(gps.location.lng(), 6);
+    delay(100);
+    sim800.write(0x1A); //ascii code for ctrl-26 //sim800.println((char)26); //ascii code for ctrl-26
+    delay(1000);
+    Serial.println("GPS Location SMS Sent Successfully.");
+  }
+}
+void sendSpeed()
+{
+  // Can take up to 60 seconds
+  boolean newData = false;
+  for (unsigned long start = millis(); millis() - start < 2000;)
+  {
+    while (neogps.available())
+    {
+      if (gps.encode(neogps.read()))
+      {
+        newData = true;
+      }
+    }
+  }
+  if (newData)      //If newData is true
+  {
+    newData = false;
+    Serial.print("Speed km/h= ");  
+    Serial.println(gps.speed.kmph());
+    delay(300);
+    sim800.print("AT+CMGF=1\r");
+    delay(1000);
+    sim800.print("AT+CMGS=\""+PHONE+"\"\r");
+    delay(1000);
+    sim800.print("Speed km/h: ");
+    sim800.print(gps.speed.kmph());
+    delay(100);
+    sim800.write(0x1A); //ascii code for ctrl-26 //sim800.println((char)26); //ascii code for ctrl-26
+    delay(1000);
+    Serial.println("GPS Speed SMS Sent Successfully.");
+  }
+} 
+void Reply(String text)
+{
+    sim800.print("AT+CMGF=1\r");
+    delay(1000);
+    sim800.print("AT+CMGS=\""+PHONE+"\"\r");
+    delay(1000);
+    sim800.print(text);
+    sim800.write(0x1A); //ascii code for ctrl-26 //sim800.println((char)26); //ascii code for ctrl-26
+    delay(1000);
+    Serial.println("SMS Sent Successfully.");
+}
+void make_call()
+{
+    Serial.println("calling....");
+    sim800.println("ATD"+PHONE+";");
+    delay(19000); //20 sec delay
+    sim800.println("ATH");
+    delay(1000); //1 sec delay
+}
+
+void sensorSMSDOOR(){
+   sensordoor = digitalRead(sdoor);
+       if (sensordoor == HIGH & oksmscar==true){
+            digitalWrite(sdoor, HIGH);           
+            Reply(" OPEN DOOR CAR ");
+            digitalWrite(RELAY_1, HIGH);
+            sendLocation();
+            digitalWrite(RELAY_2, HIGH);            
+            delay(10000);
+            digitalWrite(RELAY_2, LOW);
+            delay(1000);
+           }
+}
+void sensorSMSBAT(){
+     sensorbat = digitalRead(sbat);
+       if (sensorbat == LOW & oksmscar==true){
+            digitalWrite(sbat, LOW);
+            Reply("BAT NOT CAR"); 
+            sendLocation();
+            sendSpeed();                       
+            digitalWrite(RELAY_1, HIGH);
+            digitalWrite(RELAY_2, HIGH);                                             
+            delay(10000); 
+            digitalWrite(RELAY_2, LOW);
+            delay(1000);           
+         }           
+ } 
+void sensorSMSZZZ(){
+    sensorzzz = digitalRead(szzz);
+        if (sensorzzz == LOW & oksmscar==true){
+            digitalWrite(szzz, LOW);           
+            Reply("ZZZ IN CAR");
+            sendLocation();
+            sendSpeed();
+            digitalWrite(RELAY_2, HIGH);
+            delay(10000);
+            digitalWrite(RELAY_2, LOW);
+            delay(1000);
+        }                                    
+  }         
+void sensorCALLDOOR(){
+   sensordoor = digitalRead(sdoor);
+       if (sensordoor == HIGH & okcallcar==true){
+            digitalWrite(sdoor, HIGH); 
+            make_call();      
+            Reply("OPEN DOOR CAR");
+            digitalWrite(RELAY_1, HIGH);            
+            digitalWrite(RELAY_2, HIGH);            
+            delay(10000);
+            digitalWrite(RELAY_2, LOW);
+            delay(1000);
+           }
+}
+void sensorCALLBAT(){
+     sensorbat = digitalRead(sbat);
+       if (sensorbat == LOW & okcallcar==true){
+            digitalWrite(sbat, LOW);
+            make_call();           
+            Reply("BAT NOT CAR");                       
+            digitalWrite(RELAY_1, HIGH);
+            digitalWrite(RELAY_2, HIGH);                                             
+            delay(10000); 
+            digitalWrite(RELAY_2, LOW);
+            delay(1000);           
+         }           
+ } 
+void sensorCALLZZZ(){
+    sensorzzz = digitalRead(szzz);
+        if (sensorzzz == LOW & okcallcar==true){
+            digitalWrite(szzz, LOW);
+            make_call();                       
+            Reply("ZZZ IN CAR");           
+            digitalWrite(RELAY_2, HIGH);
+            delay(10000);
+            digitalWrite(RELAY_2, LOW);
+            delay(1000);
+        }                                    
+  }         
